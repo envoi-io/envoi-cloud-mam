@@ -1,0 +1,158 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CloudFormation template for deploying a Cantemo Portal instance
+Parameters:
+  VidispineAdminPassword:
+    Description: admin password
+    Type: String
+    NoEcho: true
+  CantemoLicenseKey:
+    Description: 'Cantemo license key. If empty, a key file must be provided.'
+    Type: String
+    NoEcho: true
+    Default: ""
+  CantemoLicenseKeyS3Url:
+    Description: S3 URL that points to a file containing the Cantemo license key (if applicable)
+    Type: String
+    Default: ""
+  AmiId:
+    Description: AMI ID for the Cantemo Portal instance
+    Type: String
+    Default: ""
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t3.2xlarge
+  ElasticNetworkInterfaceId:
+    Description: Elastic Network Interface ID
+    Type: String
+    Default: ""
+  SetupUrl:
+    Description: URL to download the Cantemo Portal setup script
+    Type: String
+    Default: "https://storage.googleapis.com/cantemo-jenkins/builds/Portal_54/149/58ee8238-2a0e-422e-8c6b-41346fa1221b/RedHat8_Portal_5.4.2-pre-149.tar"
+  CantemoStackName:
+    Description: The name of the Cantemo stack to use for resource naming
+    Type: String
+  VpcId:
+    Description: The ID of the VPC in which to create the security group
+    Type: AWS::EC2::VPC::Id
+  SSHKeyName:
+    Description: EC2 SSH Key Name
+    Type: AWS::EC2::KeyPair::KeyName
+Conditions:
+  UseDefaultAmi: !Equals [!Ref AmiId, ""]
+  AttachElasticNetworkInterface: !Not [!Equals [!Ref ElasticNetworkInterfaceId, ""]]
+Resources:
+  CantemoPortalSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupName: !Ref CantemoStackName
+      GroupDescription: 'Security group for Cantemo Portal'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          FromPort: 22
+          IpProtocol: tcp
+          ToPort: 22
+        - CidrIp: 0.0.0.0/0
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+        - CidrIp: 0.0.0.0/0
+          FromPort: 443
+          IpProtocol: tcp
+          ToPort: 443
+        - CidrIp: 134.65.164.34/32
+          FromPort: 8080
+          IpProtocol: tcp
+          ToPort: 8080
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+          FromPort: 0
+          ToPort: 65535
+      Tags:
+        - Key: Name
+          Value: !Ref CantemoStackName
+  CantemoPortalInstance:
+    Type: 'AWS::EC2::Instance'
+    DependsOn:
+      - CantemoPortalSecurityGroup
+    Properties:
+      ImageId: Fn::If [UseDefaultAmi, !FindInMap [RegionMap, !Ref "AWS::Region", DefaultAmi], !Ref AmiId]
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: envoi-cantemo-s3-full-access
+      KeyName: !Ref SSHKeyName
+      SecurityGroupIds:
+        - Ref: CantemoPortalSecurityGroup
+      UserData:
+        'Fn::Base64':
+          !Sub
+            - |
+              #!/bin/bash
+              set -e			  
+              yum install -y wget tar unzip
+              curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip"
+              cd /tmp
+              unzip awscliv2.zip
+              sudo ./aws/install
+              PATH=$PATH:/usr/local/aws-cli/v2/current/bin
+              mkdir -p "${CANTEMO_KEY_DIR_PATH}"
+              # Check if license key is provided
+              if [[ -n "$CantemoLicenseKey" ]]; then
+                # Use license key directly from parameter
+                echo "License key provided, using it for installation..."
+                echo "${CantemoLicenseKey}" > "${CANTEMO_KEY_FILE_PATH}"
+              else
+                # Check if license key file exists (using S3 if provided)
+                if [[ -n "CANTEMO_LICENSE_KEY_S3_URL" && command -v aws &> /dev/null ]]; then
+                  aws s3 cp "${CANTEMO_LICENSE_KEY_S3_URL}" "${CANTEMO_KEY_FILE_PATH}"
+                  if [[ $? -eq 0 ]]; then
+                    echo "License key file downloaded successfully."
+                  else
+                    echo "Failed to download license key file, installation may fail..."
+                  fi
+                else
+                  echo "Neither license key nor S3 details provided for license key file, installation may fail..."
+                fi
+              fi
+  
+              # Download the Cantemo Portal setup script
+              wget -q "${SETUP_URL}" -O /tmp/cantemo_setup.tar
+  
+              # Determine the directory name dynamically
+              DIR_NAME=$(tar -tf /tmp/cantemo_setup.tar | grep -o '^[^/]*/' | head -n 1 | cut -d '/' -f 1)
+              
+              # Run the Cantemo Portal setup script
+              /tmp/${DIR_NAME}/setup --allowed-hosts=* --vidispine-password=${VIDISPINE_ADMIN_PASSWORD}
+  
+              # Additional configuration and post-installation tasks can be added
+  
+              # (Optional) Remove temporary files
+              #rm -rf /tmp/cantemo_setup.tar /tmp/cantemo_setup
+            - SETUP_URL: !Ref SetupUrl
+              VIDISPINE_ADMIN_PASSWORD: !Ref VidispineAdminPassword
+              CantemoLicenseKey: !Ref CantemoLicenseKey
+              CANTEMO_LICENSE_KEY_S3_URL: !Ref CantemoLicenseKeyS3Url
+              CANTEMO_KEY_DIR_PATH: "/etc/cantemo/portal"
+              CANTEMO_KEY_FILE_PATH: "/etc/cantemo/portal/key"
+              DIR_NAME: "DIR_NAME"
+  CantemoPortalENIAttachment:
+    Type: 'AWS::EC2::NetworkInterfaceAttachment'
+    Condition: AttachElasticNetworkInterface
+    DependsOn: CantemoPortalInstance
+    Properties:
+      InstanceId: !Ref CantemoPortalInstance
+      NetworkInterfaceId: !Ref ElasticNetworkInterfaceId
+      DeviceIndex: 1
+Mappings:
+  RegionMap:
+    us-east-1:
+      AMI: ami-004b161a1cceb1ceb
+    us-west-2:
+      AMI: ami-02d80a604f6e66e3c
+    eu-north-1:
+      AMI: ami-0cb3fd8ed3880a8bb
+Outputs:
+  CantemoPortalIP:
+    Value: !GetAtt CantemoPortalInstance.PublicIp
