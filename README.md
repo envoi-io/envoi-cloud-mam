@@ -1,5 +1,7 @@
 # Envoi MAM
 
+Deploys Codemill Cantemo Portal on a single EC2 instance in AWS. 
+
 ## Usage
 
 ```
